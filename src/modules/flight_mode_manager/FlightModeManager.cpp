@@ -267,7 +267,7 @@ void FlightModeManager::start_flight_task()
 	if (_vehicle_status_sub.get().nav_state == vehicle_status_s::NAVIGATION_STATE_MY_NEW_MODE) {
 		found_some_task = true;
 		FlightTaskError error = FlightTaskError::NoError;
-		error = switchTask(FlightTaskIndex::MyMode);
+		error = switchTask(FlightTaskIndex::MyNewMode);
 		task_failure = (error != FlightTaskError::NoError);
 		matching_task_running = matching_task_running && !task_failure;
 	}
