@@ -1,13 +1,6 @@
 #pragma once
 
-// NOTE: I've inferred that the Position-mode flight task is named
-// FlightTaskManualPosition (and its header FlightTaskManualPosition.hpp)
-// from it appearing as "ManualPosition" in flight_mode_manager/CMakeLists.txt
-// in the diff you pasted -- I have not directly seen that file's contents,
-// so please confirm the exact header path/class name in your checkout
-// (it should live at
-//  src/modules/flight_mode_manager/tasks/ManualPosition/FlightTaskManualPosition.hpp)
-// and fix the #include below if it differs.
+// Placeholder task for a future custom mode; currently identical to Position mode.
 #include "FlightTaskManualPosition.hpp"
 
 // A pure copy of Position mode: zero behavior changes, just reachable
