@@ -74,9 +74,9 @@ void getVehicleControlMode(uint8_t nav_state, uint8_t vehicle_type,
 		vehicle_control_mode.flag_control_position_enabled = false;
 		break;
 
-	case vehicle_status_s::NAVIGATION_STATE_POSCTL:
 	case vehicle_status_s::NAVIGATION_STATE_MY_NEW_MODE:
-		// (existing POSCTL flag-setting code now applies to both)
+	case vehicle_status_s::NAVIGATION_STATE_POSCTL:
+		vehicle_control_mode.flag_control_manual_enabled = true;
 
 	case vehicle_status_s::NAVIGATION_STATE_POSCTL:
 	case vehicle_status_s::NAVIGATION_STATE_POSITION_SLOW:
