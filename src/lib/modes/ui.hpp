@@ -48,6 +48,7 @@ static inline uint32_t getValidNavStates()
 	return (1u << vehicle_status_s::NAVIGATION_STATE_MANUAL) |
 	       (1u << vehicle_status_s::NAVIGATION_STATE_ALTCTL) |
 	       (1u << vehicle_status_s::NAVIGATION_STATE_ALTITUDE_CRUISE) |
+		(1u << vehicle_status_s::NAVIGATION_STATE_MY_NEW_MODE) |
 	       (1u << vehicle_status_s::NAVIGATION_STATE_POSCTL) |
 	       (1u << vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION) |
 	       (1u << vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER) |
@@ -86,7 +87,7 @@ const char *const nav_state_names[vehicle_status_s::NAVIGATION_STATE_MAX] = {
 	"Termination",
 	"Offboard",
 	"Stabilized",
-	"16: UNUSED2",
+	"My New Mode",
 	"Takeoff",
 	"Land",
 	"Follow Target",
@@ -132,6 +133,8 @@ static inline bool isAdvanced(uint8_t nav_state)
 	case vehicle_status_s::NAVIGATION_STATE_ALTCTL: return false;
 
 	case vehicle_status_s::NAVIGATION_STATE_POSCTL: return false;
+
+	case vehicle_status_s::NAVIGATION_STATE_MY_NEW_MODE: return false;
 
 	case vehicle_status_s::NAVIGATION_STATE_EXTERNAL1: return false;
 

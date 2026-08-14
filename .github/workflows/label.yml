@@ -45,6 +45,12 @@ jobs:
         esac
 
         current_labels="$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')"
+        available_labels="$(gh label list --limit 200 --json name --jq '.[].name')"
+
+        if ! grep -Fxq "$label" <<< "$available_labels"; then
+          echo "Repository label '$label' does not exist. Creating it."
+          gh label create "$label" --color "ededed" --description "PR title type classification"
+        fi
 
         if grep -Fxq "$label" <<< "$current_labels"; then
           echo "PR already has $label."

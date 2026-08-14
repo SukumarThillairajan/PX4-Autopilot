@@ -154,6 +154,10 @@
                         "1073741824": {
                             "name": "external8",
                             "description": "External 8"
+                        },
+                        "65536": {
+                            "name": "my_new_mode",
+                            "description": "My New Mode"
                         }
                     }
                 },
