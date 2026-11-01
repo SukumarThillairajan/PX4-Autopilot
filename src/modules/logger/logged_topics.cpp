@@ -80,6 +80,7 @@ void LoggedTopics::add_default_topics()
 	add_optional_topic("gain_compression", 100);
 	add_topic("gimbal_manager_set_attitude", 500);
 	add_optional_topic("generator_status");
+	add_topic("gps_denied_hold_status");
 	add_topic("gps_dump");
 	add_optional_topic("gimbal_controls", 200);
 	add_optional_topic("gripper");

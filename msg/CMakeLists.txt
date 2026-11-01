@@ -116,6 +116,7 @@ set(msg_files
 	GpioIn.msg
 	GpioOut.msg
 	GpioRequest.msg
+	GpsDeniedHoldStatus.msg
 	GpsDump.msg
 	Gripper.msg
 	HealthReport.msg

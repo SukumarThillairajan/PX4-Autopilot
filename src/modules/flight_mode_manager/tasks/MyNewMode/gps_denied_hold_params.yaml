@@ -1,0 +1,120 @@
+module_name: GPS-Denied Hold
+parameters:
+- group: GPS-Denied Hold
+  definitions:
+    GDH_TR_DEG:
+      description:
+        short: Position test ratio for DEGRADED
+        long: Largest horizontal position innovation test ratio of the fused sources above
+          which the GPS-denied hold mode declares DEGRADED. 1.0 is the EKF2 gate.
+      type: float
+      default: 0.5
+      min: 0.1
+      max: 1.0
+      decimal: 2
+    GDH_T_REJ:
+      description:
+        short: Rejection time for FAILING
+        long: Position innovations continuously rejected (test ratio above 1) for longer
+          than this declare FAILING (aiding source suspect, e.g. spoofed).
+      type: float
+      default: 2.0
+      min: 0.1
+      max: 30.0
+      unit: s
+      decimal: 1
+    GDH_EPH_DEG:
+      description:
+        short: Horizontal accuracy for DEGRADED
+      type: float
+      default: 5.0
+      min: 0.5
+      max: 100.0
+      unit: m
+      decimal: 1
+    GDH_EPH_FAIL:
+      description:
+        short: Horizontal accuracy for FAILING
+      type: float
+      default: 15.0
+      min: 1.0
+      max: 200.0
+      unit: m
+      decimal: 1
+    GDH_EPH_LOST:
+      description:
+        short: Horizontal accuracy for LOST
+      type: float
+      default: 50.0
+      min: 2.0
+      max: 1000.0
+      unit: m
+      decimal: 1
+    GDH_T_LOST:
+      description:
+        short: Dead-reckoning time for LOST
+        long: Inertial dead reckoning longer than this declares LOST and switches the mode to
+          altitude hold with stick tilt. Keep it below EKF2_NOAID_TOUT so the mode reacts
+          before the estimator invalidates the horizontal solution.
+      type: float
+      default: 3.0
+      min: 0.5
+      max: 10.0
+      unit: s
+      decimal: 1
+    GDH_T_ESC:
+      description:
+        short: Persistence before escalating
+      type: float
+      default: 0.5
+      min: 0.0
+      max: 10.0
+      unit: s
+      decimal: 1
+    GDH_T_REC:
+      description:
+        short: Persistence before recovering one level
+      type: float
+      default: 5.0
+      min: 0.0
+      max: 60.0
+      unit: s
+      decimal: 1
+    GDH_VEL_DEG:
+      description:
+        short: Horizontal speed scale in DEGRADED
+        long: Fraction of MPC_VEL_MANUAL available to the pilot while DEGRADED.
+      type: float
+      default: 0.5
+      min: 0.0
+      max: 1.0
+      decimal: 2
+    GDH_VEL_FAIL:
+      description:
+        short: Horizontal speed limit in FAILING
+      type: float
+      default: 1.0
+      min: 0.0
+      max: 20.0
+      unit: m/s
+      decimal: 1
+    GDH_HOV_ACC:
+      description:
+        short: Hover detector acceleration threshold
+        long: Low-passed horizontal acceleration below which the vehicle counts as
+          unaccelerated. The accelerometer cannot distinguish hover from constant velocity.
+      type: float
+      default: 0.3
+      min: 0.01
+      max: 5.0
+      unit: m/s^2
+      decimal: 2
+    GDH_HOV_T:
+      description:
+        short: Hover detector confirmation time
+      type: float
+      default: 1.0
+      min: 0.0
+      max: 10.0
+      unit: s
+      decimal: 1

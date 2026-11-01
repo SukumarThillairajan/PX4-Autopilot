@@ -1,5 +1,14 @@
-px4_add_library(FlightTaskMyNewMode
-        FlightTaskMyNewMode.cpp
+px4_add_library(GpsDeniedHealthLadder
+	HealthLadder.cpp
 )
-target_link_libraries(FlightTaskMyNewMode PUBLIC FlightTaskManualPosition)
+target_include_directories(GpsDeniedHealthLadder PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+px4_add_library(FlightTaskMyNewMode
+	FlightTaskMyNewMode.cpp
+)
+target_link_libraries(FlightTaskMyNewMode PUBLIC FlightTaskManualPosition GpsDeniedHealthLadder)
 target_include_directories(FlightTaskMyNewMode PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+set_property(GLOBAL APPEND PROPERTY PX4_MODULE_CONFIG_FILES ${CMAKE_CURRENT_SOURCE_DIR}/gps_denied_hold_params.yaml)
+
+px4_add_unit_gtest(SRC HealthLadderTest.cpp LINKLIBS GpsDeniedHealthLadder)
