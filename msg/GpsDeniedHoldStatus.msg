@@ -5,7 +5,7 @@ uint64 timestamp                 # time since system start (microseconds)
 
 uint8 HEALTH_HEALTHY = 0         # absolute horizontal position aiding fused and consistent
 uint8 HEALTH_DEGRADED = 1        # position aiding marginal or rank-deficient, or velocity-only aiding
-uint8 HEALTH_FAILING = 2         # no horizontal aiding (inertial dead reckoning) or aiding rejected
+uint8 HEALTH_FAILING = 2         # no horizontal aiding (inertial dead reckoning), aiding rejected, or estimator status stale
 uint8 HEALTH_LOST = 3            # horizontal position no longer trusted: altitude-hold fallback
 
 uint8 health                     # current level (HEALTH_*)
@@ -23,16 +23,21 @@ uint16 REASON_EPH_HIGH = 32          # eph above GDH_EPH_DEG / GDH_EPH_FAIL / GD
 uint16 REASON_XY_INVALID = 64        # local position xy not valid
 uint16 REASON_POS_RESET = 128        # EKF horizontal position reset while in the mode (possible spoof capture)
 uint16 REASON_DR_TIMEOUT = 256       # dead reckoning longer than GDH_T_LOST
-uint16 REASON_HOVER_RANK1 = 512      # hover regime with range-only (rank-1) aiding: tangential drift unobservable
+uint16 REASON_RANGE_RANK1 = 512      # range-only (rank-1) aiding while the beacon line of sight is static
+uint16 REASON_ESTIMATOR_STALE = 1024 # no estimator status flags for more than 3 s
 
 uint16 reasons                   # REASON_* bitmask that produced the candidate level
 
-bool hover                       # hover regime: unaccelerated (|a_h| < GDH_HOV_ACC) with centred sticks for GDH_HOV_T
+bool hover                       # hover regime: no commanded motion, unaccelerated and (if observable) slow, for GDH_HOV_T
+bool hover_verified              # the speed condition came from an aided velocity, not assumed
 float32 accel_xy_filt            # low-passed horizontal acceleration magnitude used by the hover detector (m/s^2)
+bool los_static                  # beacon line of sight sweeps less than GDH_LOS_ANG in GDH_LOS_T (or unknown: true)
+float32 los_rate                 # line-of-sight angular rate about the beacon (rad/s), NaN if unknown
 bool pos_aiding                  # absolute horizontal position source fused (GNSS / external vision / aux global position)
-bool vel_aiding                  # horizontal velocity source fused (GNSS velocity / external vision velocity / optical flow)
+bool vel_aiding                  # horizontal velocity source fused (GNSS / external vision / optical flow / wind-relative)
 bool range_only_aiding           # rank-1 aiding (single range beacon); false until a beacon source exists in EKF2
 float32 pos_test_ratio           # largest horizontal position innovation test ratio of the fused sources (<1 passes the gate)
+float32 estimator_age_s          # age of the latest estimator status flags (s), NaN if none received
 float32 eph                      # EKF horizontal position standard deviation (m)
 float32 dead_reckoning_s         # time since horizontal aiding was lost (s), 0 while aided
 float32 speed_limit              # horizontal speed limit applied by the mode (m/s), NaN when not position-controlled

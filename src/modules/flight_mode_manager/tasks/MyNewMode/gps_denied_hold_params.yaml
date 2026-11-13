@@ -54,8 +54,8 @@ parameters:
       description:
         short: Dead-reckoning time for LOST
         long: Inertial dead reckoning longer than this declares LOST and switches the mode to
-          altitude hold with stick tilt. Keep it below EKF2_NOAID_TOUT so the mode reacts
-          before the estimator invalidates the horizontal solution.
+          altitude hold with stick tilt. The mode uses at most EKF2_NOAID_TOUT minus 0.5 s,
+          so that it reacts before the estimator invalidates the horizontal solution.
       type: float
       default: 3.0
       min: 0.5
@@ -109,6 +109,18 @@ parameters:
       max: 5.0
       unit: m/s^2
       decimal: 2
+    GDH_HOV_VEL:
+      description:
+        short: Hover detector speed threshold
+        long: Aided horizontal speed below which the vehicle counts as still. Used only
+          while a velocity aid (GNSS, vision or optical flow velocity) is fused; without
+          one the speed is unobservable and the detector assumes the vehicle is still.
+      type: float
+      default: 0.3
+      min: 0.05
+      max: 5.0
+      unit: m/s
+      decimal: 2
     GDH_HOV_T:
       description:
         short: Hover detector confirmation time
@@ -117,4 +129,49 @@ parameters:
       min: 0.0
       max: 10.0
       unit: s
+      decimal: 1
+    GDH_LOS_T:
+      description:
+        short: Line-of-sight rotation window
+        long: Window over which the line of sight to the beacon must rotate by at least
+          GDH_LOS_ANG for a single range to count as observing a second direction.
+      type: float
+      default: 10.0
+      min: 1.0
+      max: 120.0
+      unit: s
+      decimal: 1
+    GDH_LOS_ANG:
+      description:
+        short: Minimum line-of-sight rotation
+      type: float
+      default: 3.0
+      min: 0.1
+      max: 90.0
+      unit: deg
+      decimal: 1
+    GDH_BCN_EN:
+      description:
+        short: Beacon position known
+        long: Set to 1 when GDH_BCN_N and GDH_BCN_E hold the beacon position in the local
+          frame. Without it the line-of-sight test falls back to the hover flag.
+      type: boolean
+      default: 0
+    GDH_BCN_N:
+      description:
+        short: Beacon north position in the local frame
+      type: float
+      default: 0.0
+      min: -100000.0
+      max: 100000.0
+      unit: m
+      decimal: 1
+    GDH_BCN_E:
+      description:
+        short: Beacon east position in the local frame
+      type: float
+      default: 0.0
+      min: -100000.0
+      max: 100000.0
+      unit: m
       decimal: 1

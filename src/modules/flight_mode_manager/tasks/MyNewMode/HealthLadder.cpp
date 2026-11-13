@@ -40,6 +40,16 @@ namespace gdh
 
 static constexpr float US_PER_S = 1e6f;
 
+static inline bool elapsed(uint64_t now_us, uint64_t since_us, float seconds)
+{
+	return now_us >= since_us && static_cast<float>(now_us - since_us) >= seconds * US_PER_S;
+}
+
+static inline float clampf(float x, float lo, float hi)
+{
+	return std::isfinite(x) ? (x < lo ? lo : (x > hi ? hi : x)) : lo;
+}
+
 const char *healthName(Health h)
 {
 	switch (h) {
@@ -55,6 +65,26 @@ const char *healthName(Health h)
 	return "?";
 }
 
+void LadderParams::sanitize()
+{
+	tr_degraded = clampf(tr_degraded, 0.01f, 1.f);
+	t_reject_s = clampf(t_reject_s, 0.f, 60.f);
+	eph_degraded = clampf(eph_degraded, 0.1f, 1e4f);
+	eph_failing = clampf(eph_failing, eph_degraded, 1e4f);
+	eph_lost = clampf(eph_lost, eph_failing, 1e4f);
+	t_lost_s = clampf(t_lost_s, 0.f, 60.f);
+	t_escalate_s = clampf(t_escalate_s, 0.f, 60.f);
+	t_recover_s = clampf(t_recover_s, 0.f, 600.f);
+	t_reset_hold_s = clampf(t_reset_hold_s, 0.f, 600.f);
+	t_stale_s = clampf(t_stale_s, 0.5f, 60.f);
+}
+
+void HealthLadder::setParams(const LadderParams &p)
+{
+	_p = p;
+	_p.sanitize();
+}
+
 void HealthLadder::reset(uint64_t now_us)
 {
 	_level = Health::HEALTHY;
@@ -64,15 +94,16 @@ void HealthLadder::reset(uint64_t now_us)
 	_transitions = 0;
 	_initialized = false;
 	_t_level_start = now_us;
-	_t_candidate_start = now_us;
-	_t_dr_start = 0;
-	_t_reject_start = 0;
-	_t_last_reset = 0;
+	_worse_active = false;
+	_better_active = false;
+	_dr_active = false;
+	_reject_active = false;
+	_reset_seen = false;
 }
 
 float HealthLadder::deadReckoningSeconds(uint64_t now_us) const
 {
-	return (_t_dr_start == 0 || now_us < _t_dr_start) ? 0.f : (now_us - _t_dr_start) / US_PER_S;
+	return (!_dr_active || now_us < _t_dr) ? 0.f : static_cast<float>(now_us - _t_dr) / US_PER_S;
 }
 
 Health HealthLadder::classify(const LadderInputs &in, uint16_t &reasons)
@@ -88,33 +119,44 @@ Health HealthLadder::classify(const LadderInputs &in, uint16_t &reasons)
 		}
 	};
 
-	// A single range observes only its line of sight: acceptable while moving, rank-1 at hover.
-	const bool range_counts = in.range_only_aiding && !in.hover;
-	const bool any_aiding = in.pos_aiding || in.vel_aiding || in.range_only_aiding;
+	// Stale or missing estimator status: the aiding flags cannot be trusted, assume none.
+	const bool stale = !std::isfinite(in.estimator_age_s) || in.estimator_age_s > _p.t_stale_s;
+	const bool pos_aiding = in.pos_aiding && !stale;
+	const bool vel_aiding = in.vel_aiding && !stale;
+	const bool range_aiding = in.range_only_aiding && !stale;
+
+	// A single range observes only its line of sight: acceptable while the LOS rotates,
+	// rank-1 while it is static (hover, or motion straight towards / away from the beacon).
+	const bool range_counts = range_aiding && !in.los_static;
+	const bool any_aiding = pos_aiding || vel_aiding || range_aiding;
+	const bool dead_reckoning = (in.dead_reckoning && !stale) || !any_aiding;
 
 	// timers
-	if (in.dead_reckoning || !any_aiding) {
-		if (_t_dr_start == 0) {
-			_t_dr_start = in.now_us;
+	if (dead_reckoning) {
+		if (!_dr_active) {
+			_dr_active = true;
+			_t_dr = in.now_us;
 		}
 
 	} else {
-		_t_dr_start = 0;
+		_dr_active = false;
 	}
 
-	const bool rejecting = in.pos_aiding && (in.pos_test_ratio > 1.f);
+	const bool rejecting = pos_aiding && (in.pos_test_ratio > 1.f);
 
 	if (rejecting) {
-		if (_t_reject_start == 0) {
-			_t_reject_start = in.now_us;
+		if (!_reject_active) {
+			_reject_active = true;
+			_t_reject = in.now_us;
 		}
 
 	} else {
-		_t_reject_start = 0;
+		_reject_active = false;
 	}
 
 	if (in.pos_reset) {
-		_t_last_reset = in.now_us;
+		_reset_seen = true;
+		_t_reset = in.now_us;
 	}
 
 	const bool eph_finite = std::isfinite(in.eph);
@@ -128,33 +170,37 @@ Health HealthLadder::classify(const LadderInputs &in, uint16_t &reasons)
 		raise(Health::LOST, EPH_HIGH);
 	}
 
-	if (_t_dr_start != 0 && deadReckoningSeconds(in.now_us) > _p.t_lost_s) {
+	if (_dr_active && elapsed(in.now_us, _t_dr, _p.t_lost_s)) {
 		raise(Health::LOST, DR_TIMEOUT);
 	}
 
 	// FAILING
-	if (_t_dr_start != 0) {
-		raise(Health::FAILING, in.dead_reckoning ? DEAD_RECKONING : (NO_POS_AIDING | NO_VEL_AIDING));
+	if (stale) {
+		raise(Health::FAILING, ESTIMATOR_STALE);
+	}
+
+	if (_dr_active) {
+		raise(Health::FAILING, (in.dead_reckoning && !stale) ? DEAD_RECKONING : (NO_POS_AIDING | NO_VEL_AIDING));
 	}
 
 	if (eph_finite && in.eph > _p.eph_failing) {
 		raise(Health::FAILING, EPH_HIGH);
 	}
 
-	if (rejecting && (in.now_us - _t_reject_start) > _p.t_reject_s * US_PER_S) {
+	if (_reject_active && elapsed(in.now_us, _t_reject, _p.t_reject_s)) {
 		raise(Health::FAILING, REJECTING);
 	}
 
 	// DEGRADED
-	if (!in.pos_aiding && !range_counts) {
-		raise(Health::DEGRADED, in.range_only_aiding ? HOVER_RANK1 : NO_POS_AIDING);
+	if (!pos_aiding && !range_counts) {
+		raise(Health::DEGRADED, range_aiding ? RANGE_RANK1 : NO_POS_AIDING);
 	}
 
-	if (!in.vel_aiding) {
+	if (!vel_aiding) {
 		reasons |= NO_VEL_AIDING; // informative only: position aiding alone still bounds the drift
 	}
 
-	if (in.pos_aiding && in.pos_test_ratio > _p.tr_degraded) {
+	if (pos_aiding && in.pos_test_ratio > _p.tr_degraded) {
 		raise(Health::DEGRADED, TEST_RATIO_HIGH);
 	}
 
@@ -162,7 +208,7 @@ Health HealthLadder::classify(const LadderInputs &in, uint16_t &reasons)
 		raise(Health::DEGRADED, EPH_HIGH);
 	}
 
-	if (_t_last_reset != 0 && (in.now_us - _t_last_reset) < _p.t_reset_hold_s * US_PER_S) {
+	if (_reset_seen && !elapsed(in.now_us, _t_reset, _p.t_reset_hold_s)) {
 		raise(Health::DEGRADED, POS_RESET);
 	}
 
@@ -174,42 +220,142 @@ bool HealthLadder::update(const LadderInputs &in)
 	uint16_t reasons = 0;
 	const Health c = classify(in, reasons);
 	_reasons = reasons;
+	_candidate = c;
 
 	if (!_initialized) {
 		_initialized = true;
 		_level = c;
 		_prev = c;
-		_candidate = c;
 		_t_level_start = in.now_us;
-		_t_candidate_start = in.now_us;
+		_worse_active = false;
+		_better_active = false;
 		return false;
 	}
 
-	if (c != _candidate) {
-		_candidate = c;
-		_t_candidate_start = in.now_us;
-	}
+	if (c > _level) {
+		// Escalation: the timer runs while the candidate stays worse than the level, whatever
+		// worse level it is, so a candidate flickering between two worse levels still escalates.
+		_better_active = false;
 
-	if (_candidate == _level) {
-		return false;
-	}
+		if (!_worse_active) {
+			_worse_active = true;
+			_t_worse = in.now_us;
+		}
 
-	const bool worse = _candidate > _level;
-	const bool immediate = worse && (reasons & XY_INVALID);
-	const float need_s = worse ? _p.t_escalate_s : _p.t_recover_s;
+		const bool immediate = (reasons & XY_INVALID) != 0;
 
-	if (immediate || (in.now_us - _t_candidate_start) >= need_s * US_PER_S) {
-		_prev = _level;
+		if (immediate || elapsed(in.now_us, _t_worse, _p.t_escalate_s)) {
+			_prev = _level;
+			_level = c;
+			_t_level_start = in.now_us;
+			_worse_active = false;
+			++_transitions;
+			return true;
+		}
 
-		// escalate straight to the candidate, recover one level at a time
-		_level = worse ? _candidate : static_cast<Health>(static_cast<uint8_t>(_level) - 1);
-		_t_level_start = in.now_us;
-		_t_candidate_start = in.now_us; // next recovery step needs its own persistence
-		++_transitions;
-		return true;
+	} else if (c < _level) {
+		// Recovery: one level per t_recover_s of continuously better candidates.
+		_worse_active = false;
+
+		if (!_better_active) {
+			_better_active = true;
+			_t_better = in.now_us;
+		}
+
+		if (elapsed(in.now_us, _t_better, _p.t_recover_s)) {
+			_prev = _level;
+			_level = static_cast<Health>(static_cast<uint8_t>(_level) - 1);
+			_t_level_start = in.now_us;
+			_t_better = in.now_us; // the next step needs its own full period
+			++_transitions;
+			return true;
+		}
+
+	} else {
+		_worse_active = false;
+		_better_active = false;
 	}
 
 	return false;
+}
+
+void HoverDetector::reset()
+{
+	_s = HoverState{};
+	_lpf_n = 0.f;
+	_lpf_e = 0.f;
+	_raw_active = false;
+}
+
+const HoverState &HoverDetector::update(const HoverInputs &in)
+{
+	// accelerometer-derived horizontal acceleration, low-passed
+	if (std::isfinite(in.acc_n) && std::isfinite(in.acc_e) && in.dt_s > 0.f) {
+		const float alpha = in.dt_s / (_p.lpf_tau_s + in.dt_s);
+		_lpf_n += alpha * (in.acc_n - _lpf_n);
+		_lpf_e += alpha * (in.acc_e - _lpf_e);
+	}
+
+	_s.acc_filt = std::sqrt(_lpf_n * _lpf_n + _lpf_e * _lpf_e);
+	_s.unaccelerated = _s.acc_filt < _p.acc_thr;
+
+	// commanded motion (pilot sticks or autopilot); NaN = position lock = no motion commanded
+	const bool sp_finite = std::isfinite(in.sp_n) && std::isfinite(in.sp_e);
+	_s.intent_still = !sp_finite || std::sqrt(in.sp_n * in.sp_n + in.sp_e * in.sp_e) < _p.sp_thr;
+
+	const bool vel_finite = in.vel_valid && std::isfinite(in.vel_n) && std::isfinite(in.vel_e);
+
+	if (in.vel_aided && vel_finite) {
+		_s.velocity_still = std::sqrt(in.vel_n * in.vel_n + in.vel_e * in.vel_e) < _p.vel_thr;
+		_s.verified = true;
+
+	} else {
+		_s.velocity_still = true; // speed not observable: assume the conservative case
+		_s.verified = false;
+	}
+
+	const bool raw = _s.intent_still && _s.unaccelerated && _s.velocity_still;
+
+	if (raw) {
+		if (!_raw_active) {
+			_raw_active = true;
+			_t_raw = in.now_us;
+		}
+
+		_s.hover = elapsed(in.now_us, _t_raw, _p.t_confirm_s);
+
+	} else {
+		_raw_active = false;
+		_s.hover = false;
+	}
+
+	// line-of-sight rotation about the beacon
+	const bool rel_finite = std::isfinite(in.rel_n) && std::isfinite(in.rel_e);
+	const float rho = rel_finite ? std::sqrt(in.rel_n * in.rel_n + in.rel_e * in.rel_e) : NAN;
+
+	if (!in.has_beacon || !rel_finite) {
+		// beacon position unknown: hover is the dominant static-LOS case
+		_s.los_rate = NAN;
+		_s.los_static = _s.hover;
+
+	} else if (rho <= _p.rho_min) {
+		// directly above the beacon (blind cone): no horizontal direction is observed
+		_s.los_rate = NAN;
+		_s.los_static = true;
+
+	} else if (in.vel_aided && vel_finite) {
+		// tangential speed |v x u| over the horizontal distance
+		const float v_t = std::fabs(in.vel_n * in.rel_e - in.vel_e * in.rel_n) / rho;
+		_s.los_rate = v_t / rho;
+		_s.los_static = _s.los_rate * _p.los_window_s < _p.los_angle_min_rad;
+
+	} else {
+		// rotation not observable without a velocity aid: conservative
+		_s.los_rate = NAN;
+		_s.los_static = true;
+	}
+
+	return _s;
 }
 
 } // namespace gdh

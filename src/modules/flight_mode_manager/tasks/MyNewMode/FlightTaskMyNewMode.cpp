@@ -38,22 +38,24 @@
 
 using namespace matrix;
 
-static constexpr float STICK_CENTRED = 0.05f;   ///< |pitch/roll stick| below this counts as centred
-static constexpr float HOVER_LPF_TAU_S = 0.5f;  ///< time constant of the horizontal-acceleration low-pass
 static constexpr hrt_abstime STATUS_PERIOD_US = 500000; ///< status rate while no transition happens (2 Hz)
+static constexpr float LOST_MARGIN_S = 0.5f;           ///< keep GDH_T_LOST this far below EKF2_NOAID_TOUT
 
 bool FlightTaskMyNewMode::activate(const trajectory_setpoint_s &last_setpoint)
 {
 	const bool ret = FlightTaskManualPosition::activate(last_setpoint);
 
-	_loadLadderParams();
+	_loadParams();
 	_ladder.reset(_time_stamp_activate);
+	_hover_detector.reset();
 	_xy_reset_counter_valid = false;
-	_acc_xy_lpf.zero();
-	_unaccelerated_since = 0;
-	_hover = false;
+	_last_vel_sp_xy = Vector2f(NAN, NAN);
 	_speed_limit = NAN;
 	_last_status_publish = 0;
+
+	// latest estimator status even if it was published before this task existed
+	_estimator_status_flags_sub.copy(&_flags);
+	_estimator_test_ratios_sub.copy(&_test_ratios);
 
 	return ret;
 }
@@ -67,16 +69,21 @@ bool FlightTaskMyNewMode::updateInitialize()
 
 bool FlightTaskMyNewMode::update()
 {
-	_loadLadderParams(); // parameter members are refreshed by FlightModeManager::handleParameterUpdate()
+	_loadParams(); // parameter members are refreshed by FlightModeManager::handleParameterUpdate()
 	_updateEstimatorStatus();
 	_updateHoverDetector();
 	_updateHealth();
 
 	// ManualAltitude::update() calls our _scaleSticks() and _updateSetpoints()
-	return FlightTaskManualPosition::update();
+	const bool ret = FlightTaskManualPosition::update();
+
+	// remember the commanded horizontal velocity for the next cycle's hover detector;
+	// a locked position (finite position setpoint, zero velocity setpoint) is "no motion"
+	_last_vel_sp_xy = Vector2f(_velocity_setpoint.xy());
+	return ret;
 }
 
-void FlightTaskMyNewMode::_loadLadderParams()
+void FlightTaskMyNewMode::_loadParams()
 {
 	gdh::LadderParams p{};
 	p.tr_degraded = _param_gdh_tr_deg.get();
@@ -84,15 +91,27 @@ void FlightTaskMyNewMode::_loadLadderParams()
 	p.eph_degraded = _param_gdh_eph_deg.get();
 	p.eph_failing = _param_gdh_eph_fail.get();
 	p.eph_lost = _param_gdh_eph_lost.get();
-	p.t_lost_s = _param_gdh_t_lost.get();
 	p.t_escalate_s = _param_gdh_t_esc.get();
 	p.t_recover_s = _param_gdh_t_rec.get();
-	_ladder.setParams(p);
+
+	// LOST must act before EKF2 declares the horizontal solution invalid
+	const float noaid_s = static_cast<float>(_param_ekf2_noaid_tout.get()) * 1e-6f;
+	p.t_lost_s = math::min(_param_gdh_t_lost.get(), math::max(noaid_s - LOST_MARGIN_S, 0.f));
+	_ladder.setParams(p); // also sanitises ranges and the eph ordering
+
+	gdh::HoverParams h{};
+	h.acc_thr = _param_gdh_hov_acc.get();
+	h.vel_thr = _param_gdh_hov_vel.get();
+	h.t_confirm_s = _param_gdh_hov_t.get();
+	h.los_window_s = _param_gdh_los_t.get();
+	h.los_angle_min_rad = math::radians(_param_gdh_los_ang.get());
+	_hover_detector.setParams(h);
 }
 
 void FlightTaskMyNewMode::_updateEstimatorStatus()
 {
-	// follow the estimator instance the system actually uses (multi-EKF)
+	// follow the estimator instance the system actually uses (multi-EKF); keep the last
+	// flags until the new instance publishes, staleness is judged from their timestamp
 	estimator_selector_status_s selector;
 
 	if (_estimator_selector_status_sub.update(&selector)) {
@@ -100,8 +119,8 @@ void FlightTaskMyNewMode::_updateEstimatorStatus()
 			_estimator_instance = selector.primary_instance;
 			_estimator_status_flags_sub.ChangeInstance(_estimator_instance);
 			_estimator_test_ratios_sub.ChangeInstance(_estimator_instance);
-			_flags = {};
-			_test_ratios = {};
+			_estimator_status_flags_sub.copy(&_flags);
+			_estimator_test_ratios_sub.copy(&_test_ratios);
 		}
 	}
 
@@ -111,31 +130,23 @@ void FlightTaskMyNewMode::_updateEstimatorStatus()
 
 void FlightTaskMyNewMode::_updateHoverDetector()
 {
-	// Hover regime = unaccelerated horizontally (accelerometer-derived NED acceleration) with
-	// centred sticks, held for GDH_HOV_T. An accelerometer measures specific force: it cannot
-	// tell hover from constant-velocity flight, so this flags "unaccelerated", not "stationary".
 	const vehicle_local_position_s &lpos = _sub_vehicle_local_position.get();
-	const Vector2f acc_xy(lpos.ax, lpos.ay);
 
-	if (acc_xy.isAllFinite() && _deltatime > 0.f) {
-		const float alpha = _deltatime / (HOVER_LPF_TAU_S + _deltatime);
-		_acc_xy_lpf += alpha * (acc_xy - _acc_xy_lpf);
-	}
-
-	const bool sticks_centred = _sticks.isAvailable() && (_sticks.getPitchRoll().norm() < STICK_CENTRED);
-	const bool unaccelerated = _acc_xy_lpf.norm() < _param_gdh_hov_acc.get();
-
-	if (sticks_centred && unaccelerated) {
-		if (_unaccelerated_since == 0) {
-			_unaccelerated_since = _time_stamp_current;
-		}
-
-		_hover = (_time_stamp_current - _unaccelerated_since) >= static_cast<hrt_abstime>(_param_gdh_hov_t.get() * 1e6f);
-
-	} else {
-		_unaccelerated_since = 0;
-		_hover = false;
-	}
+	gdh::HoverInputs in{};
+	in.now_us = _time_stamp_current;
+	in.dt_s = _deltatime;
+	in.acc_n = lpos.ax;
+	in.acc_e = lpos.ay;
+	in.vel_n = lpos.vx;
+	in.vel_e = lpos.vy;
+	in.vel_valid = lpos.v_xy_valid;
+	in.vel_aided = _flags.cs_gnss_vel || _flags.cs_ev_vel || _flags.cs_opt_flow;
+	in.sp_n = _last_vel_sp_xy(0);
+	in.sp_e = _last_vel_sp_xy(1);
+	in.has_beacon = (_param_gdh_bcn_en.get() != 0) && lpos.xy_valid;
+	in.rel_n = lpos.x - _param_gdh_bcn_n.get();
+	in.rel_e = lpos.y - _param_gdh_bcn_e.get();
+	_hover_detector.update(in);
 }
 
 void FlightTaskMyNewMode::_updateHealth()
@@ -144,13 +155,15 @@ void FlightTaskMyNewMode::_updateHealth()
 
 	gdh::LadderInputs &in = _inputs;
 	in.now_us = _time_stamp_current;
+	in.estimator_age_s = (_flags.timestamp > 0 && _time_stamp_current >= _flags.timestamp)
+			     ? static_cast<float>(_time_stamp_current - _flags.timestamp) * 1e-6f : NAN;
 	in.xy_valid = lpos.xy_valid && lpos.v_xy_valid;
 	in.eph = lpos.eph;
 	in.pos_aiding = _flags.cs_gnss_pos || _flags.cs_ev_pos || _flags.cs_aux_gpos;
-	in.vel_aiding = _flags.cs_gnss_vel || _flags.cs_ev_vel || _flags.cs_opt_flow;
-	in.range_only_aiding = false; // EKF2 has no single-beacon range source yet (report: future work)
+	in.vel_aiding = _flags.cs_gnss_vel || _flags.cs_ev_vel || _flags.cs_opt_flow || _flags.cs_wind_dead_reckoning;
+	in.range_only_aiding = false; // EKF2 has no single-beacon range observation yet
 	in.dead_reckoning = _flags.cs_inertial_dead_reckoning;
-	in.hover = _hover;
+	in.los_static = _hover_detector.state().los_static;
 
 	float ratio = 0.f;
 
@@ -202,21 +215,27 @@ void FlightTaskMyNewMode::_scaleSticks()
 
 	Vector2f vel_xy(_velocity_setpoint.xy());
 
+	if (!vel_xy.isAllFinite()) {
+		vel_xy.zero();
+	}
+
 	switch (_ladder.level()) {
 	case gdh::Health::HEALTHY:
 		_speed_limit = _param_mpc_vel_manual.get();
 		break;
 
-	case gdh::Health::DEGRADED:
-		_speed_limit = _param_mpc_vel_manual.get() * math::constrain(_param_gdh_vel_deg.get(), 0.f, 1.f);
-		vel_xy *= math::constrain(_param_gdh_vel_deg.get(), 0.f, 1.f);
-		break;
+	case gdh::Health::DEGRADED: {
+			const float scale = math::constrain(_param_gdh_vel_deg.get(), 0.f, 1.f);
+			_speed_limit = _param_mpc_vel_manual.get() * scale;
+			vel_xy *= scale;
+			break;
+		}
 
 	case gdh::Health::FAILING:
-		_speed_limit = math::min(_param_gdh_vel_fail.get(), _param_mpc_vel_manual.get());
+		_speed_limit = math::constrain(_param_gdh_vel_fail.get(), 0.f, _param_mpc_vel_manual.get());
 
 		if (vel_xy.norm() > _speed_limit) {
-			vel_xy = vel_xy.normalized() * _speed_limit;
+			vel_xy = (_speed_limit > 0.f) ? vel_xy.normalized() * _speed_limit : Vector2f(0.f, 0.f);
 		}
 
 		break;
@@ -238,6 +257,7 @@ void FlightTaskMyNewMode::_updateSetpoints()
 		_velocity_setpoint.xy() = Vector2f(NAN, NAN);
 
 	} else {
+		// leaving LOST: no stale horizontal acceleration, the position lock re-engages when slow
 		FlightTaskManualPosition::_updateSetpoints();
 	}
 }
@@ -249,6 +269,7 @@ void FlightTaskMyNewMode::_publishStatus(bool transition)
 	}
 
 	const vehicle_local_position_s &lpos = _sub_vehicle_local_position.get();
+	const gdh::HoverState &hov = _hover_detector.state();
 
 	gps_denied_hold_status_s status{};
 	status.health = static_cast<uint8_t>(_ladder.level());
@@ -257,12 +278,16 @@ void FlightTaskMyNewMode::_publishStatus(bool transition)
 	status.transitions = _ladder.transitions();
 	status.time_in_level_us = _ladder.timeInLevelUs(_time_stamp_current);
 	status.reasons = _ladder.reasons();
-	status.hover = _hover;
-	status.accel_xy_filt = _acc_xy_lpf.norm();
+	status.hover = hov.hover;
+	status.hover_verified = hov.verified;
+	status.accel_xy_filt = hov.acc_filt;
+	status.los_static = hov.los_static;
+	status.los_rate = hov.los_rate;
 	status.pos_aiding = _inputs.pos_aiding;
 	status.vel_aiding = _inputs.vel_aiding;
 	status.range_only_aiding = _inputs.range_only_aiding;
 	status.pos_test_ratio = _inputs.pos_test_ratio;
+	status.estimator_age_s = _inputs.estimator_age_s;
 	status.eph = lpos.eph;
 	status.dead_reckoning_s = _ladder.deadReckoningSeconds(_time_stamp_current);
 	status.speed_limit = _speed_limit;
